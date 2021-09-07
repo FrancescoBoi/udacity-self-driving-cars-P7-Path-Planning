@@ -1,0 +1,308 @@
+\documentclass{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{listings}
+\usepackage[colorlinks = true,
+            linkcolor = blue,
+            urlcolor  = blue,
+            citecolor = blue,
+            anchorcolor = blue]{hyperref}
+\usepackage{graphicx}
+\usepackage{subfig}
+\usepackage[dvipsnames,table,xcdraw]{xcolor}
+\usepackage{array}
+\newcolumntype{P}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{M}[1]{>{\centering\arraybackslash}m{#1}}
+\author{Francesco Boi}
+\title{Self-driving cars program - project  7: Path planner}
+\date{}
+
+\let\cd\lstinline
+
+\begin{document}
+% Python style for highlighting
+
+\maketitle
+\tableofcontents 
+
+\lstdefinestyle{customc}{
+  belowcaptionskip=1\baselineskip,
+  breaklines=true,
+  %frame=L,
+  xleftmargin=\parindent,
+  language = C++,
+  showstringspaces=false,
+  basicstyle=\footnotesize\ttfamily,
+  keywordstyle=\bfseries\color{blue!85!black},
+  commentstyle=\itshape\color{gray},
+  identifierstyle=\color{black},
+  stringstyle=\color{red},
+  numbers=left,                    				% where to put the line-numbers; possible values are (none, left, right)
+  numbersep=5pt,                   			% how far the line-numbers are from the code
+  numberstyle=\tiny\color{gray},     % the style that is used for the line-numbers
+  stepnumber=1,
+  tabsize=4,
+}
+\lstdefinestyle{customasm}{
+  belowcaptionskip=1\baselineskip,
+  frame=L,
+  %xleftmargin=\parindent,
+  language=[x86masm]Assembler,
+  basicstyle=\footnotesize\ttfamily,
+  commentstyle=\itshape\color{purple!40!black},
+  stepnumber=1,
+   tabsize=4,
+}
+\definecolor{lightgray}{rgb}{.9,.9,.9}
+\definecolor{darkgray}{rgb}{.4,.4,.4}
+\definecolor{purple}{rgb}{0.65, 0.12, 0.82}
+\lstset{escapechar=ç,style=customc}
+\section{Content of the project}
+Here is the content of the project:
+\begin{itemize}
+\item \textit{writeup.pdf} (this file): report of the project;
+\item \textit{writeup.tex}: source tex file;
+\item \textit{src}: folder containing the C++ source code of the project;
+\item \textit{README.md}: file giving a general description of the project.
+\end{itemize}
+
+\section{Project goals}
+The final goal of the project is to autonomously drive the car in the \href{https://github.com/udacity/self-driving-car-sim/releases/tag/T3\_v1.2}{simulator} for a minimum distance of 4.32 miles respecting the following constraints:
+\begin{itemize}
+\item the car stays in its lane, except for the time between changing lanes;
+\item the speed limit must not be exceeded;
+\item maximum acceleration and jerk must not be exceeded;
+\item the car does not have any collision with other cars;
+\item the car is able to change lane;
+\end{itemize}
+
+\section{Instruction}
+Instructions to compile and run the code are included in the README.md file.
+
+\section{General workflow}
+At each iteration, some sparse waypoints are chosen, which are then interpolated using splines to get a path with a total of $50$.
+
+Generating such waypoints completely anew at each iteration might result in discontinuity that generates high jerks, large steering angles and so on. To avoid this, the extra path points the car did not go through at the previous iteration are partly reused: the last two points of the path are taken as the first two waypoints, generating in this way a continuous path across different iterations. In contrast, if at least two points of the previous path are not available, two points are used: the latter is chosen as the current car point, whereas the former is a point chosen as \cd+car_x-cos(ref_yaw)+ and \cd+car_y-sin(ref_yaw)+. The goal of this is to generate a path that is tangent to the current path of the car: without this workaround infeasible paths might be generated, for example one that is perpendicular or opposite to the current heading of the car. Other three waypoints equally spaced are chosen. Once we have all the waypoints we interpolate them using spline to get the final path.
+
+
+\section{Keep lane or change lane}
+Driving a car through a highway most of the time consists of keeping the current lane. Achieving this goal with classical Cartesian coordinates it is difficult due to the curves in the road. It is much better to use Frenet coordinates presented in lecture. At each iteration we check if a more suitable lane is available or not. To do that we iterate over each car in the \cd+sensor_fusion+ vector, and 
+extract the vehicle's information (lines 107-114 of the \cd+main.cpp+ file):
+\begin{lstlisting}
+for (size_t i=0; i<sensor_fusion.size(); ++i)
+{
+  float d = sensor_fusion[i][6];
+  double vx = sensor_fusion[i][3], vy=sensor_fusion[i][4];
+  double check_speed = sqrt(pow(vx,2)+pow(vy,2));
+  double check_car_s = sensor_fusion[i][5];              
+\end{lstlisting}
+$d$ is the the distance from the median line of the road: from its value we can deduct the current lane of the other vehicle. Three cases are considered: the vehicle is in our current lane, it is in the right lane next to ours or in the left one. 
+
+\subsection{Car in the same lane}
+The first case is implemented in the lines 115-132:
+\begin{lstlisting}
+if ((d<2+4*lane+2) && (d>2+4*lane-2)) //car in the same lane
+{
+    if((check_car_s>car_s)&&(check_car_s-car_s<30.))
+    {
+        //slow down
+        too_close = true;
+        propose_lane = std::max(lane-1, 0);
+    }
+    else if((check_car_s<car_s)&&(car_s-check_car_s<25.)&&
+      (propose_lane==lane))//if we have decided to overtake,
+      //we stick to that decision, otherwise we move to the right
+      // lane because there's a faster car behind us
+    {
+      propose_lane = std::min(lane+1, 2);
+    }
+}
+\end{lstlisting}
+The first nested condition checks if we are too close to a vehicle ahead of us in the same lane; if so, we raise the \cd+too_close+ flag to reduce the speed and propose a lane change to the left. In contrast, the second condition checks if a car behind us is coming too close: if so, a lane change to the right is put forward in order to let the other car go. Note the extra boolean condition \cd+(propose_lane==lane)+ in the second block: this is because if in the previous iterations we proposed a left line change, then we stick to that decision. The goal of this control is to avoid changing the decision at each iteration. In fact, when we get too close to a car ahead the planner slows the car down and propose a left change. By slowing down, a car from behind might get too close, so that a right lane change seems reasonable to the algorithm, overwriting in this case the previous decision of changing to the left lane. This control avoids this situation.
+
+\subsection{Car in the left lane}
+Lines from 137 to 149 checks if a left lane change can be performed safely:
+\begin{lstlisting}
+else if((d<2+4*(lane-1)+2) && (d>2+4*(lane-1)-2)) //car in the left lane
+{
+  //if there is a car ahead in the left lane with slower speed
+   if ((check_car_s>car_s)&& (check_car_s-car_s<40.*ref_vel/car_speed) && (check_speed<car_speed))
+  {
+    safe_left_change = false;
+  }
+  // if the car from behind is coming with higher speed
+  else if ((check_car_s<car_s)&&(car_s-check_car_s<40.*ref_vel/car_speed))
+  {
+    safe_left_change = false;
+  }
+}
+\end{lstlisting}
+The first nested condition checks if there is a car ahead in the left lane that is too close (within $40m$) and if so a flag, initialised to \cd+true+ is set to \cd+false+. In the same way, the flag is set to false even when there is a car in the left lane that is close to us. Instead of using a rough distance threshold, \cd+ref_vel/car_speed+ has been used: this is because when we are going at lower speed, for example when there is a car in front of us, the manoeuvre takes more time to be performed.
+
+\subsection{Car in the right lane}
+Lines from 155 to 168 checks if a right lane change can be performed safely:
+\begin{lstlisting}
+else if ((d<2+4*(lane+1)+2) && (d>2+4*(lane+1)-2)) //car in the right lane
+{
+  //if the car is ahead with slower speed than ours
+  if ((check_car_s>car_s)&&(check_car_s-car_s<40.*ref_vel/car_speed))
+  {
+    safe_right_change = false;
+  }
+  // if the car from behind is coming with higher speed
+  else if ((check_car_s<car_s)&&(car_s-check_car_s<40.*ref_vel/car_speed))
+  {
+    safe_right_change = false;
+  }
+}
+\end{lstlisting}
+The subconditions are the same of the ones in the left change.
+\subsection{Extra condition at the starting of the simulator}
+Before checking the left or right lane change are feasible, an extra condition is added before those in lines 132-236, that if true, it excludes the formers:
+\begin{lstlisting}
+else if (car_s<200) 
+{
+  safe_left_change = false;
+  safe_right_change = false;
+}
+\end{lstlisting}
+At the beginning of the simulation the car has $0$ speed and it accelerates quite slowly. In this case, a lane change, especially to the right, is very easily proposed, but due to the slow speed of our vehicle, a collision might happen with car coming from behind. For this, if the car has not travelled at least $200m$, no lane change is considered.
+
+\subsection{Conifrm the lane change}
+After the iteration over all the vehicles, the lane change is confirmed or denied by the following code:
+\begin{lstlisting}
+if ((safe_right_change && (propose_lane==lane+1)) ||
+ (safe_left_change && (propose_lane==lane-1)))
+{
+  lane = propose_lane;
+}
+\end{lstlisting}
+Here, the proposed change is compared to the current lane and the flags for a safe transition are checked too. If no lane change is proposed or if it is not safe then the current lane is kept.
+
+\section{Speed limit must not be exceeded}
+The speed limit is hardly coded in the lines from 171 to 178:
+\begin{lstlisting}
+if (too_close)
+{
+  ref_vel -= 0.2;
+}
+else 
+{
+  ref_vel = fmin(ref_vel+0.5, 49.9);
+}
+\end{lstlisting}
+\cd+too_close+ is the flag that is raised when the vehicle is getting too close with a car ahead in the same lane. When it is raised, the desired velocity of the vehicle is reduced to avoid collision. Otherwise, it is incremented up to $49.9mph$, which is a little less than the highway speed limit of $50.$ (using $50.$ results in exceeding the speed limit). The  speed increment is set to $0.5$ and the speed decrement to $0.2$: they respect the maximum acceleration constraint. The \cd+ref_vel+ is ensured to not exceed the speed limit by using the minimum value between the incremented \cd+ref_vel+ and the \cd+speed_limit+.
+
+\section{Path generation}
+Two sets of points are used: one, consisting of the vectors \cd+next_x_vals+ and \cd+next_y_vals+ represents the real path points obtained by interpolation, the other, consisting of the vectors \cd+ptsx+ and \cd+ptsy+ are the sparse waypoints.
+
+\subsection{Sparse waypoints}
+Lines from 191 to 213 sets the first two waypoints. 
+\begin{lstlisting}
+size_t prev_size = previous_path_x.size();
+...
+double ref_x=car_x, ref_y=car_y, ref_yaw=deg2rad(car_yaw);
+/* If prev_size is (almost) empty (all waypoints consumed), use the car
+as starting reference*/
+if (prev_size<2)
+{
+    //use 2 points that make the path tangent to the car
+    std::cout<<"No prev points\n";
+    double prev_car_x = car_x - cos(ref_yaw);
+    double prev_car_y = car_y - sin(ref_yaw);
+    ptsx.push_back(prev_car_x);
+    ptsx.push_back(car_x);
+    ptsy.push_back(prev_car_y);
+    ptsy.push_back(car_y);
+}
+else //use the remaining points of the prev path
+{
+    ref_x = previous_path_x[prev_size-1];
+    ref_y = previous_path_y[prev_size-1];
+    double prev_ref_x = previous_path_x[prev_size-2];
+    double prev_ref_y = previous_path_y[prev_size-2];
+    ref_yaw = atan2(ref_y-prev_ref_y, ref_x-prev_ref_x);
+    ptsx.push_back(prev_ref_x);
+    ptsx.push_back(ref_x);
+    ptsy.push_back(prev_ref_y);
+    ptsy.push_back(ref_y);
+}
+\end{lstlisting}
+In the second block, if at least two path points are available from the previous path, then the last and the last but one are chosen as the first two waypoints, the reference point given by \cd+ref_x+ and \cd+ref_y+ is updated to the the last point and \cd+ref_yaw+ is calculated. In this way, discontinuities caused by generating the whole path anew are avoided.
+
+If there are not enough points from the previous path the actual car position is used together with an arbitrary previous point chosen to make the corresponding segment tangent to the current path. In this way, the path planner generates always feasible paths that do not cause the car to exceed the maximum jerk.
+
+Other three way points spaced by $30m$ are added by the code in the lines from 215 to 221:
+\begin{lstlisting}
+for (size_t i=1; i<4; ++i)
+{
+  vector<double> next_wp = getXY(car_s+30.*i, 2+4*lane, map_waypoints_s,
+    map_waypoints_x, map_waypoints_y);
+  ptsx.push_back(next_wp[0]);
+  ptsy.push_back(next_wp[1]);
+}
+\end{lstlisting}
+The new points are generated starting from the Fernet coordinates of the car. Then, they are converted back to the $x,y$ reference system and appended to the two vectors.
+
+Lines from 224 to 230 convert these waypoints from the current $x,y$ reference system to the car frame reference system:
+\begin{lstlisting}
+for (size_t i=0; i<ptsx.size(); ++i)
+{
+  double shift_x = ptsx[i] - ref_x;
+  double shift_y = ptsy[i] - ref_y;
+  ptsx[i] = shift_x*cos(0-ref_yaw)-shift_y*sin(0-ref_yaw);
+  ptsy[i] = shift_x*sin(0-ref_yaw)+shift_y*cos(0-ref_yaw);
+}
+\end{lstlisting}
+
+\subsection{Generating path points}
+First, the previous path points are reused (lines 232-236):
+\begin{lstlisting}
+for (size_t i=0; i<prev_size; ++i)
+{
+  next_x_vals.push_back(previous_path_x[i]);
+  next_y_vals.push_back(previous_path_y[i]);
+}
+\end{lstlisting}
+Then, a spline is created and populated with waypoints and other variables are set as well:
+\begin{lstlisting}
+tk::spline s;
+s.set_points(ptsx, ptsy);
+//break up the spline to travel at the reference velocity
+//target point: 30m
+double target_x = 30.;
+double target_y = s(target_x);
+double target_dist = sqrt(pow(target_x, 2)+ pow(target_y, 2));
+double x_add_on = 0.; // position of the car w.r.t. car coordinates
+double N = target_dist/(0.02*ref_vel/2.24);
+\end{lstlisting}
+The desired path should consist of $50$ points. An horizon value is set with \cd+target_x= 30.+ and the corresponding \cd+target_y+ is calculated using the spline. From them, we calculate the \cd+target_dist+ and initialise \cd+x_add_on+ to $0$. The variable $N$ instead how many points spaced by $0.02M$ considering the reference speed are needed to cover that distance.
+Next the \cd+next_x_vals+ and \cd+next_y_vals+ vectors are populated with the following cycle until they hold $50$ elements:
+\begin{lstlisting}
+for (size_t i=0; i<50-previous_path_x.size(); ++i)
+{
+  //we want points separated by 0.02 m;
+  // 2.24->conversion from mph to meters/s
+  double x_point = x_add_on+target_x/N;
+  double y_point = s(x_point);
+  x_add_on = x_point;
+  double x_ref=x_point, y_ref=y_point;
+  // convert to global coordinates again
+  x_point = x_ref*cos(ref_yaw) - y_ref*sin(ref_yaw) ;
+  y_point = x_ref*sin(ref_yaw) + y_ref*cos(ref_yaw);
+  x_point += ref_x;
+  y_point += ref_y;
+  next_x_vals.push_back(x_point);
+  next_y_vals.push_back(y_point);
+}
+\end{lstlisting}
+At each iteration a new \cd+x_point+ is considered spaced by \cd+target_x/N+ from the previous one and the \cd+add_on+ variable is updated consequently. The spline is used to calculate the corresponding y-value and the reference coordinates are updated. 
+
+\section{Observed issues}
+Some issues have been observed.
+\subsection{Collision with another car}
+Suppose the car is in the right most lane and another car slightly ahead but in left most lane, whereas the middle lane is completely free. The planning algorithm decides that it is safe to change to the left lane since there are no cars in that lane. However, also the other car decides to move to the middle lane. The cars are too close and a collision happens.
+
+\end{document}
